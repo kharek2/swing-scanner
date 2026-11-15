@@ -5,12 +5,10 @@ from email.mime.text import MIMEText
 import pandas as pd
 import yfinance as yf
 
-# ---------- सेटिंग्स ----------
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "your_email@gmail.com")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "xxxx xxxx xxxx xxxx")
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 SEND_TO = os.getenv("SEND_TO", GMAIL_ADDRESS)
 
-# नमूने की सूची। आप इसमें और NSE शेयर जोड़ सकते हैं (अंत में .NS ज़रूरी है)
 STOCKS = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR",
     "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK",
@@ -22,9 +20,9 @@ STOCKS = [
     "INDUSINDBK",
 ]
 
-BREAKOUT_DAYS = 20      # पिछले इतने दिन का हाई तोड़ना चाहिए
-VOLUME_MULTIPLE = 1.5   # वॉल्यूम औसत का कम से कम इतना गुना
-ATR_STOP_MULT = 1.5     # स्टॉप-लॉस = एंट्री - 1.5 x ATR
+BREAKOUT_DAYS = 20
+VOLUME_MULTIPLE = 1.5
+ATR_STOP_MULT = 1.5
 
 
 def atr(df, period=14):
@@ -55,7 +53,6 @@ def scan_stock(symbol):
     breakout = last["Close"] > last["HIGH_N"]
     volume_ok = last["Volume"] >= VOLUME_MULTIPLE * last["VOL_AVG"]
     trend_ok = last["Close"] > last["DMA50"]
-
     if not (breakout and volume_ok and trend_ok):
         return None
 
@@ -65,34 +62,70 @@ def scan_stock(symbol):
     target1 = entry + 1.5 * risk
     target2 = entry + 2.5 * risk
 
+    prev = df.iloc[-2]
+    prev_levels = {"high": float(prev["High"]), "low": float(prev["Low"]),
+                   "close": float(prev["Close"])}
+    window = df.iloc[-21:-1]
+    high20 = float(window["High"].max())
+    low20 = float(window["Low"].min())
+
+    support_candidates = [v for v in (prev_levels["low"], low20,
+                                      float(last["DMA50"])) if v < entry]
+    support = max(support_candidates) if support_candidates else None
+
+    # पिछले 6 महीने का सबसे ऊँचा भाव, अगर वह भाव के ऊपर हो तो रेज़िस्टेंस है
+    six_month_high = float(df["High"].max())
+    resistance = six_month_high if six_month_high > entry else None
+    if resistance is not None and resistance < target1:
+        target1 = resistance
+
     return {
         "symbol": symbol,
-        "entry": entry,
-        "stop": stop,
-        "target1": target1,
-        "target2": target2,
+        "entry": entry, "stop": stop,
+        "target1": target1, "target2": target2,
+        "risk_pts": risk, "risk_pct": risk / entry * 100,
         "volume_x": float(last["Volume"] / last["VOL_AVG"]),
-        "risk_pct": risk / entry * 100,
+        "prev": prev_levels, "high20": high20, "low20": low20,
+        "dma50": float(last["DMA50"]),
+        "support": support, "resistance": resistance,
     }
 
 
 def build_email(results):
     lines = ["आज के स्कैन में ब्रेकआउट वाले शेयर:", ""]
     for r in results:
+        reward1 = r["target1"] - r["entry"]
+        reward2 = r["target2"] - r["entry"]
+        rr1 = reward1 / r["risk_pts"] if r["risk_pts"] else 0
+        p = r["prev"]
         lines += [
-            f"{r['symbol']}",
+            r["symbol"],
             f"  एंट्री के आसपास: {r['entry']:.2f}",
-            f"  स्टॉप-लॉस: {r['stop']:.2f} (लगभग {r['risk_pct']:.1f}% नीचे)",
-            f"  टारगेट 1: {r['target1']:.2f}   टारगेट 2: {r['target2']:.2f}",
+            f"  स्टॉप-लॉस: {r['stop']:.2f}",
+            f"  ज़्यादा से ज़्यादा नुकसान (स्टॉप लगने पर): {r['risk_pts']:.2f} पॉइंट प्रति शेयर, "
+            f"यानी {r['risk_pct']:.1f}%",
+            f"  टारगेट 1: {r['target1']:.2f} (संभावित {reward1:.2f} पॉइंट, जोखिम का {rr1:.1f} गुना)",
+            f"  टारगेट 2: {r['target2']:.2f} (संभावित {reward2:.2f} पॉइंट)",
+            f"  पिछले दिन: हाई {p['high']:.2f}, लो {p['low']:.2f}, क्लोज़ {p['close']:.2f}",
+            f"  पिछले 20 दिन: हाई {r['high20']:.2f}, लो {r['low20']:.2f}",
+            f"  50 दिन का औसत: {r['dma50']:.2f}",
+        ]
+        if r["support"]:
+            lines.append(f"  पास का सपोर्ट: {r['support']:.2f}")
+        if r["resistance"]:
+            lines.append(f"  पास का रेज़िस्टेंस (6 महीने का हाई): {r['resistance']:.2f}")
+        lines += [
             f"  वॉल्यूम औसत का {r['volume_x']:.1f} गुना",
             "  अनुमानित होल्डिंग: 3 से 10 ट्रेडिंग दिन, या स्टॉप/टारगेट लगने तक",
+            "  ख़ास: अगर भाव स्टॉप-लॉस के नीचे बंद हो जाए तो ट्रेड से बाहर निकलें",
             "",
         ]
     lines += [
         "सुझाव: टारगेट 1 पर आधा मुनाफ़ा निकालकर स्टॉप-लॉस एंट्री पर ले आएँ।",
         "",
         "चेतावनी: यह सिर्फ़ तकनीकी नियमों पर आधारित स्कैन है, निवेश सलाह नहीं। "
-        "बाज़ार में नुकसान हो सकता है। अपना शोध करें और जोखिम सीमित रखें।",
+        "पॉइंट के आँकड़े अनुमान हैं, गारंटी नहीं। बाज़ार में नुकसान हो सकता है। "
+        "अपना शोध करें और जोखिम सीमित रखें।",
     ]
     return "\n".join(lines)
 
