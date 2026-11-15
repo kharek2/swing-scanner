@@ -52,6 +52,22 @@ def save_sent(today, sent):
         f.write(today + "\n" + "\n".join(sorted(sent)))
 
 
+def previous_day_levels(symbol):
+    d = yf.download(symbol + ".NS", period="10d", interval="1d",
+                    progress=False, auto_adjust=True)
+    if d is None or len(d) < 2:
+        return None
+    if isinstance(d.columns, pd.MultiIndex):
+        d.columns = d.columns.get_level_values(0)
+    today = datetime.now(IST).date()
+    d = d[d.index.date < today]
+    if d.empty:
+        return None
+    p = d.iloc[-1]
+    return {"high": float(p["High"]), "low": float(p["Low"]),
+            "close": float(p["Close"])}
+
+
 def scan_stock(symbol):
     df = yf.download(symbol + ".NS", period="1d", interval="5m",
                      progress=False, auto_adjust=True)
@@ -65,6 +81,7 @@ def scan_stock(symbol):
     if len(opening) < 6:
         return None
     open_high = float(opening["High"].max())
+    open_low = float(opening["Low"].min())
 
     typical = (df["High"] + df["Low"] + df["Close"]) / 3
     vwap = (typical * df["Volume"]).cumsum() / df["Volume"].cumsum()
@@ -83,37 +100,79 @@ def scan_stock(symbol):
     if not (above_vwap and broke_out and volume_ok):
         return None
 
+    levels = previous_day_levels(symbol)
+
     rng = (df["High"] - df["Low"]).tail(12).mean()
     risk = max(float(rng) * STOP_ATR_MULT * 2, price * 0.004)
     stop = max(float(vwap.iloc[-1]), price - risk)
     risk = price - stop
     if risk <= 0:
         return None
+
+    target1 = price + 1.5 * risk
+    target2 = price + 2.5 * risk
+
+    resistance = None
+    support = None
+    if levels:
+        above = [v for v in (levels["high"], levels["close"]) if v > price]
+        if above:
+            resistance = min(above)
+        below = [v for v in (levels["low"], levels["close"], open_low)
+                 if v < price]
+        if below:
+            support = max(below)
+    if resistance is not None and resistance < target1:
+        target1 = resistance
+
+    day_high = float(df["High"].max())
     return {
         "symbol": symbol, "entry": price, "stop": stop,
-        "target1": price + 1.5 * risk, "target2": price + 2.5 * risk,
+        "target1": target1, "target2": target2,
         "vol_x": vol_x, "vwap": float(vwap.iloc[-1]),
-        "risk_pct": risk / price * 100,
+        "risk_pts": risk, "risk_pct": risk / price * 100,
+        "open_high": open_high, "open_low": open_low,
+        "day_high": day_high,
+        "prev": levels, "resistance": resistance, "support": support,
     }
 
 
 def build_email(results):
     lines = ["इंट्राडे ब्रेकआउट वाले शेयर:", ""]
     for r in results:
+        reward1 = r["target1"] - r["entry"]
+        reward2 = r["target2"] - r["entry"]
+        rr1 = reward1 / r["risk_pts"] if r["risk_pts"] else 0
         lines += [
             r["symbol"],
             f"  एंट्री के आसपास: {r['entry']:.2f}",
-            f"  स्टॉप-लॉस: {r['stop']:.2f} (लगभग {r['risk_pct']:.2f}% नीचे)",
-            f"  टारगेट 1: {r['target1']:.2f}   टारगेट 2: {r['target2']:.2f}",
+            f"  स्टॉप-लॉस: {r['stop']:.2f}",
+            f"  ज़्यादा से ज़्यादा नुकसान (स्टॉप लगने पर): {r['risk_pts']:.2f} पॉइंट प्रति शेयर, "
+            f"यानी {r['risk_pct']:.2f}%",
+            f"  टारगेट 1: {r['target1']:.2f} (संभावित {reward1:.2f} पॉइंट, जोखिम का {rr1:.1f} गुना)",
+            f"  टारगेट 2: {r['target2']:.2f} (संभावित {reward2:.2f} पॉइंट)",
             f"  VWAP: {r['vwap']:.2f}, वॉल्यूम औसत का {r['vol_x']:.1f} गुना",
+            f"  ओपनिंग रेंज: हाई {r['open_high']:.2f}, लो {r['open_low']:.2f}",
+            f"  आज का अब तक का हाई: {r['day_high']:.2f}",
+        ]
+        if r["prev"]:
+            p = r["prev"]
+            lines.append(
+                f"  पिछले दिन: हाई {p['high']:.2f}, लो {p['low']:.2f}, क्लोज़ {p['close']:.2f}")
+        if r["resistance"]:
+            lines.append(f"  पास का रेज़िस्टेंस: {r['resistance']:.2f}")
+        if r["support"]:
+            lines.append(f"  पास का सपोर्ट: {r['support']:.2f}")
+        lines += [
             "  होल्डिंग: आज ही, ज़्यादा से ज़्यादा दोपहर 3:15 तक",
+            "  ख़ास: अगर भाव वापस VWAP के नीचे बंद हो जाए तो ट्रेड कमज़ोर माना जाए",
             "",
         ]
     lines += [
         "सुझाव: टारगेट 1 पर आधा मुनाफ़ा निकालें और स्टॉप-लॉस एंट्री पर ले आएँ।",
         "",
         "चेतावनी: यह सिर्फ़ तकनीकी स्कैन है, निवेश सलाह नहीं। डेटा 15 मिनट देर से हो सकता है, "
-        "इसलिए एंट्री से पहले ब्रोकर का भाव देखें। नुकसान हो सकता है।",
+        "इसलिए एंट्री से पहले ब्रोकर का भाव देखें। पॉइंट के आँकड़े अनुमान हैं, गारंटी नहीं। नुकसान हो सकता है।",
     ]
     return "\n".join(lines)
 
