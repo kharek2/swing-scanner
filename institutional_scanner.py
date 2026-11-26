@@ -53,14 +53,17 @@ def get_master() -> pd.DataFrame:
     x["_seg"] = x[seg].astype(str).str.upper()
     x["_inst"] = x[inst].astype(str).str.upper()
     x["_sym"] = x[sym].astype(str).str.upper().str.strip()
+    symbol_name = "SM_SYMBOL_NAME" if "SM_SYMBOL_NAME" in x.columns else sym
+    x["_underlying"] = x[symbol_name].astype(str).str.upper().str.strip()
     x["_sid"] = x[sid].astype(str)
     x["_expiry"] = pd.to_datetime(x[expiry], errors="coerce", dayfirst=True)
-    fut = x[(x["_exch"] == "NSE") & (x["_seg"].isin(["D", "F", "I"])) & (x["_inst"] == "FUTSTK")].copy()
-    # Restrict to current/future dated contracts and select nearest expiry per underlying.
-    fut = fut[fut["_expiry"].isna() | (fut["_expiry"].dt.date >= date.today())]
-    fut = fut.sort_values("_expiry").drop_duplicates("_sym")
-    eq = x[(x["_exch"] == "NSE") & (x["_inst"] == "EQUITY")].drop_duplicates("_sym")
-    joined = fut.merge(eq[["_sym", "_sid"]], on="_sym", how="inner", suffixes=("_fut", "_eq"))
+    fut = x[(x["_exch"] == "NSE") & (x["_seg"] == "D") & (x["_inst"] == "FUTSTK")].copy()
+    # Compact master SM_SYMBOL_NAME carries the underlying name; match it to cash trading symbol.
+    fut["_underlying"] = fut["_underlying"].str.replace(r"[^A-Z0-9&-]", "", regex=True)
+    fut = fut[fut["_expiry"].notna() & (fut["_expiry"].dt.date >= date.today())]
+    fut = fut.sort_values("_expiry").drop_duplicates("_underlying")
+    eq = x[(x["_exch"] == "NSE") & (x["_seg"] == "E") & (x["_inst"] == "EQUITY")].drop_duplicates("_sym")
+    joined = fut.merge(eq[["_sym", "_sid"]], left_on="_underlying", right_on="_sym", how="inner", suffixes=("_fut", "_eq"))
     out = pd.DataFrame({
         "symbol": joined["_sym"],
         "equity_security_id": joined["_sid_eq"],
@@ -106,7 +109,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     delta = x.Close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-    rs = gain / loss.replace(0, pd.NA)
+    rs = gain / loss.replace(0, 1e-10)
     x["RSI14"] = 100 - (100 / (1 + rs))
     x["VOL20"] = x.Volume.rolling(20).mean()
     x["VOL_X"] = x.Volume / x.VOL20
