@@ -91,7 +91,7 @@ def dhan_daily(security_id: str, instrument: str, from_date: str, to_date: str, 
     if not data or not data.get("timestamp"):
         return pd.DataFrame()
     frame = pd.DataFrame({k: data.get(k, []) for k in ("open","high","low","close","volume","open_interest","timestamp") if data.get(k) is not None})
-    frame["date"] = pd.to_datetime(frame.pop("timestamp"), unit="s", errors="coerce").dt.tz_localize(None).dt.normalize()
+    frame["date"] = pd.to_datetime(frame.pop("timestamp"), unit="s", utc=True, errors="coerce").dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
     frame = frame.set_index("date").sort_index()
     frame.columns = [c.title() for c in frame.columns]
     for c in frame.columns: frame[c] = pd.to_numeric(frame[c], errors="coerce")
@@ -143,8 +143,8 @@ def score_symbol(symbol: str, eq: pd.DataFrame, fut: pd.DataFrame, delivery: pd.
     if pd.isna(last.ATR14) or pd.isna(last.VOL_X): return None
     px_chg = (last.Close / prev.Close - 1) * 100 if prev.Close else 0
     oi_chg = None
-    if not fut.empty and "Open_interest" in fut.columns and len(fut) >= 2 and fut.Open_interest.iloc[-2]:
-        oi_chg = (fut.Open_interest.iloc[-1] / fut.Open_interest.iloc[-2] - 1) * 100
+    if not fut.empty and "Open_Interest" in fut.columns and len(fut) >= 2 and fut.Open_Interest.iloc[-2]:
+        oi_chg = (fut.Open_Interest.iloc[-1] / fut.Open_Interest.iloc[-2] - 1) * 100
     drow = optional_row(delivery, symbol)
     orow = optional_row(orderflow, symbol)
     # Delivery CSV expected: symbol,delivery_pct,delivery_pct_avg20 (optional).
